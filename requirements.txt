@@ -1,0 +1,4 @@
+ s3tokenizer
+ torch>2.2
+ torchaudio
+ transformers

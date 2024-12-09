@@ -8,7 +8,7 @@ from transformers.models.qwen2_moe.configuration_qwen2_moe import \
 
 from simpletts.configs import (DataArguments, TrainingArguments,
                                TTSLLMModelConfig)
-from simpletts.datasets.dataset import init_dataset_and_dataloader
+from simpletts.datasets.tts_llm_dataset import init_dataset_and_dataloader
 from simpletts.llm import TTSLLM
 from simpletts.utils.campplus import SpkEmbExtractor
 

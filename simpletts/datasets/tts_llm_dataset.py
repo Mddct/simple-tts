@@ -29,7 +29,7 @@ def compute_feature(sample):
 
 def filter_by_length(sample, max_seconds=30):
     wav = sample['wav']
-    if wav.shape[0] / 16000 <= 30:
+    if wav.shape[0] / 16000 <= max_seconds:
         return True
     return False
 

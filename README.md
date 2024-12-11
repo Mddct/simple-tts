@@ -23,7 +23,7 @@ TODO
 
 ### 2 train llm on speech tokens with  text and spk condition
 - [ ] tokenizer: char + bpe
-- [ ] generate
+- [x] generate
 ``` bash
 output_dir=s1_output
 # campplus.onnx path

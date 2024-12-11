@@ -2,7 +2,6 @@ from typing import Dict
 
 import s3tokenizer
 import torch
-from torch import nn
 from transformers import PreTrainedModel
 
 from simpletts.utils.common import (add_sos_eos, combine_shif_left,
@@ -33,15 +32,52 @@ class TTSLLM(PreTrainedModel):
             self._keys_to_ignore_on_save.add('speech_tokenizer.' + k)
 
     @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-    def forward(
+    def generate(
         self,
         spk_emb: torch.Tensor,
-        speech: torch.Tensor,
-        speech_lens: torch.Tensor,
+        prompt_speech: torch.Tensor,
+        prompt_speech_lens: torch.Tensor,
         text: torch.Tensor,
         text_lens: torch.Tensor,
-        **kwargs,
-    ):
+        topk: float,
+        topp: float,
+        do_sample: bool,
+        eos_token_id: int,
+        max_new_tokens: int,
+    ) -> torch.Tensor:
+        """ NOTE: text format: [<s>[prompt text] text </s>]
+        """
+        (prompts_speech_tokens_in, _,
+         prompts_speech_lens) = self._get_speech_tokens(
+             prompt_speech, prompt_speech_lens)
+        prompts_speech_token_mask = make_pad_mask(prompts_speech_lens)
+        text_mask = make_pad_mask(text_lens)
+        text_speech, _ = combine_shif_left(
+            text.unsqueeze(2), text_mask,
+            prompts_speech_tokens_in.unsqueeze(2), prompts_speech_token_mask)
+        text_speech = text_speech.squeeze(1)
+
+        text_speech_emb = self.llm.get_input_embeddings()(text_speech)
+        spk_emb = self.spk_embed_affine_layer(spk_emb).unsqueeze(1)
+        # [spk, text , speech]
+        inputs_embeds = torch.cat((spk_emb, text_speech_emb), dim=1)
+
+        # do speech continous writing
+        attention_mask = make_non_pad_mask(prompt_speech_lens - 1 + text_lens +
+                                           1)
+        model_outputs = self.llm.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            do_sample=do_sample,
+            top_p=topp,
+            tpp_k=topk,
+            max_new_tokens=max_new_tokens,
+            eos_token_id=eos_token_id,
+        )
+        return model_outputs
+
+    def _get_speech_tokens(self, speech: torch.Tensor,
+                           speech_lens: torch.Tensor):
         # 1 speech tokens
         speech_codes, speech_codes_lens = self.speech_tokenizer.quantize(
             speech, speech_lens)
@@ -56,6 +92,21 @@ class TTSLLM(PreTrainedModel):
             -100,
         )
         speech_codes_lens = speech_codes_lens + 2
+        return speech_token_in, speech_token_out, speech_codes_lens
+
+    @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+    def forward(
+        self,
+        spk_emb: torch.Tensor,
+        text: torch.Tensor,
+        text_lens: torch.Tensor,
+        speech: torch.Tensor,
+        speech_lens: torch.Tensor,
+        **kwargs,
+    ):
+        # 1 speech tokens
+        speech_token_in, speech_token_out, speech_codes_lens = self._get_speech_tokens(
+            speech, speech_lens)
 
         # 2  speaker embed
         spk_emb = self.spk_embed_affine_layer(spk_emb)

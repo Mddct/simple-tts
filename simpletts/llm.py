@@ -50,21 +50,10 @@ class TTSLLM(PreTrainedModel):
         (prompts_speech_tokens_in, _,
          prompts_speech_lens) = self._get_speech_tokens(
              prompt_speech, prompt_speech_lens)
-        prompts_speech_token_mask = make_pad_mask(prompts_speech_lens)
-        text_mask = make_pad_mask(text_lens)
-        text_speech, _ = combine_shif_left(
-            text.unsqueeze(2), text_mask,
-            prompts_speech_tokens_in.unsqueeze(2), prompts_speech_token_mask)
-        text_speech = text_speech.squeeze(1)
-
-        text_speech_emb = self.llm.get_input_embeddings()(text_speech)
-        spk_emb = self.spk_embed_affine_layer(spk_emb).unsqueeze(1)
-        # [spk, text , speech]
-        inputs_embeds = torch.cat((spk_emb, text_speech_emb), dim=1)
-
-        # do speech continous writing
-        attention_mask = make_non_pad_mask(prompt_speech_lens - 1 + text_lens +
-                                           1)
+        inputs_embeds, input_lens = self.get_input_embedding(
+            spk_emb, text, text_lens, prompts_speech_tokens_in,
+            prompts_speech_lens)
+        attention_mask = make_non_pad_mask(input_lens)
         model_outputs = self.llm.generate(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
@@ -94,6 +83,40 @@ class TTSLLM(PreTrainedModel):
         speech_codes_lens = speech_codes_lens + 2
         return speech_token_in, speech_token_out, speech_codes_lens
 
+    def get_input_embedding(
+        self,
+        spk_emb: torch.Tensor,
+        text: torch.Tensor,
+        text_lens: torch.Tensor,
+        speech_tokens: torch.Tensor,
+        speech_tokens_lens: torch.Tensor,
+    ):
+        # speaker embed
+        spk_emb = self.spk_embed_affine_layer(spk_emb)
+
+        # text tokens + speech tokens
+        # NOTE:
+        #   text: <bos>....<eos>
+        # [text_emb, speech_codes_emb]
+        text_padding_mask = make_pad_mask(text_lens)
+        speech_in_padding_mask = make_pad_mask(speech_tokens_lens)
+        text_speech, _ = combine_shif_left(text.unsqueeze(2),
+                                           speech_tokens.unsqueeze(2),
+                                           text_padding_mask,
+                                           speech_in_padding_mask)
+        text_speech = text_speech.squeeze(2)
+        # [text_emb, <startof_audio> ....]
+        text_speech_emb = self.llm.get_input_embeddings()(text_speech)
+
+        # 4 speaker embed + text tokens + speech tokens
+        # [spk_emb, text_emb, speech_codes_emb]
+        #  spke_emb <bos>...<eos> <|start_of_audio|> speech tokens ...
+        input_embeds = torch.cat((spk_emb.unsqueeze(1), text_speech_emb),
+                                 dim=1)
+        input_lens = text_lens + speech_tokens_lens + 1
+
+        return input_embeds, input_lens
+
     @torch.autocast(device_type="cuda", dtype=torch.bfloat16)
     def forward(
         self,
@@ -107,32 +130,12 @@ class TTSLLM(PreTrainedModel):
         # 1 speech tokens
         speech_token_in, speech_token_out, speech_codes_lens = self._get_speech_tokens(
             speech, speech_lens)
-
-        # 2  speaker embed
-        spk_emb = self.spk_embed_affine_layer(spk_emb)
-
-        # 3 text tokens + speech tokens
-        # NOTE:
-        #   text: <bos>....<eos>
-        # [text_emb, speech_codes_emb]
-        text_padding_mask = make_pad_mask(text_lens)
         speech_in_padding_mask = make_pad_mask(speech_codes_lens - 1)
-        text_speech, _ = combine_shif_left(text.unsqueeze(2),
-                                           speech_token_in.unsqueeze(2),
-                                           text_padding_mask,
-                                           speech_in_padding_mask)
-        text_speech = text_speech.squeeze(2)
-        # [text_emb, <startof_audio> ....]
-        text_speech_emb = self.llm.get_input_embeddings()(text_speech)
 
-        # 4 speaker embed + text tokens + speech tokens
-        # [spk_emb, text_emb, speech_codes_emb]
-        #  spke_emb <bos>...<eos> <|start_of_audio|> speech tokens ...
-        input_embeds = torch.cat((spk_emb.unsqueeze(1), text_speech_emb),
-                                 dim=1)
-        input_lens = text_lens + (speech_codes_lens - 1) + 1
-
-        # 5 targets
+        # 2 get input embeds
+        input_embeds, input_lens = self.get_input_embedding(
+            text, text_lens, speech, speech_token_in, speech_codes_lens - 1)
+        # 3 targets
         ignore_id_prepand = torch.zeros(input_embeds.size(0),
                                         1 + text.size(1),
                                         dtype=torch.long,
@@ -147,9 +150,9 @@ class TTSLLM(PreTrainedModel):
         targets = targets.squeeze(2)
         assert targets.shape[1] == input_embeds.shape[1]
 
-        # 6 attention mask
+        # 4 attention mask
         attention_mask = make_non_pad_mask(input_lens)
-        # 7 forward and loss
+        # 5 forward and loss
         return self.llm(
             inputs_embeds=input_embeds,
             attention_mask=attention_mask,

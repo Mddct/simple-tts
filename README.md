@@ -84,6 +84,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node=8 simpletts/train_dit.py \
 
 ### 3 (Optional) train low latency streaming HIFIFAN or Vocos
 TODO
+- ［ ］https://github.com/Mddct/transformer-vocos
 
 ## Inference
 - [ ] vllm
